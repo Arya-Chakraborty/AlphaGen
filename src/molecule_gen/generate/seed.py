@@ -48,8 +48,64 @@ def seed_from_papyrus(
     return picked
 
 
-def candidates_from_seed_table(frame: pd.DataFrame) -> list[dict]:
+def pick_near_misses(frame: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Lowest-penalty out-of-range rows, preferring those that already pass most constraints."""
+    if n <= 0 or frame.empty or "in_range" not in frame.columns:
+        return frame.iloc[0:0].copy()
+    misses = frame.loc[~frame["in_range"]].copy()
+    if misses.empty:
+        return misses
+    misses = misses.sort_values(
+        ["n_passed", "penalty"],
+        ascending=[False, True],
+        kind="mergesort",
+    )
+    return misses.head(n).reset_index(drop=True)
+
+
+def seed_papyrus_near_misses(
+    spec: ConstraintSpec,
+    *,
+    n_seeds: int,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Papyrus molecules closest to the spec that are not already in range."""
+    mol_path = molecules_parquet_path()
+    if not mol_path.exists():
+        raise FileNotFoundError(
+            f"Molecule table not found at {mol_path}. Run fetch-papyrus first."
+        )
+    print(
+        f"picking Papyrus near-misses for ({', '.join(spec.names())})",
+        file=sys.stderr,
+        flush=True,
+    )
+    table = load_papyrus_descriptor_table(spec.names())
+    scored = score_frame(table, spec)
+    molecules = pd.read_parquet(
+        mol_path, columns=[MORDRED_ID_COL, "canonical_smiles", "inchikey"]
+    )
+    merged = scored.merge(molecules, on=MORDRED_ID_COL, how="inner")
+    in_range = merged[merged["in_range"]]
+    print(
+        f"{len(in_range):,} Papyrus already in range; using out-of-range near-misses as seeds",
+        file=sys.stderr,
+        flush=True,
+    )
+    picked = pick_near_misses(merged, max(n_seeds * 3, n_seeds))
+    return picked.head(n_seeds * 3).reset_index(drop=True)
+
+
+def candidates_from_seed_table(
+    frame: pd.DataFrame,
+    *,
+    origin: str = "seed",
+    require_reasonable: bool = False,
+    limit: int | None = None,
+) -> list[dict]:
     """Encode seed SMILES to SELFIES; drop rows that do not round-trip."""
+    from molecule_gen.generate.chemistry import is_reasonable_molecule
+
     rows: list[dict] = []
     for rec in tqdm(
         frame.itertuples(index=False),
@@ -60,6 +116,8 @@ def candidates_from_seed_table(frame: pd.DataFrame) -> list[dict]:
         mininterval=0.5,
     ):
         smiles = str(getattr(rec, "canonical_smiles"))
+        if require_reasonable and not is_reasonable_molecule(smiles):
+            continue
         encoded = encode_roundtrip(smiles)
         if encoded is None:
             continue
@@ -80,8 +138,10 @@ def candidates_from_seed_table(frame: pd.DataFrame) -> list[dict]:
                 "in_range": bool(getattr(rec, "in_range")),
                 "n_passed": int(getattr(rec, "n_passed")),
                 "source": "papyrus",
-                "origin": "seed",
+                "origin": origin,
                 "generation": 0,
             }
         )
+        if limit is not None and len(rows) >= limit:
+            break
     return rows

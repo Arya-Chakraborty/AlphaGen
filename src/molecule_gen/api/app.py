@@ -49,7 +49,7 @@ class GenerateRequest(BaseModel):
     n: int = Field(default=5, ge=1, le=50)
     descriptors: dict[str, DescriptorRangeIn]
     population: int = Field(default=DEFAULT_POPULATION, ge=4, le=256)
-    generations: int = Field(default=DEFAULT_GENERATIONS, ge=0, le=200)
+    generations: int = Field(default=DEFAULT_GENERATIONS, ge=0, le=1000)
     seed: int = 0
 
 

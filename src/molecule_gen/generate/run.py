@@ -13,11 +13,16 @@ from molecule_gen.constraints.score import score_vector
 from molecule_gen.constraints.spec import ConstraintSpec
 from molecule_gen.data.clean import connectivity_from_inchikey
 from molecule_gen.generate.ga import evolve
-from molecule_gen.generate.seed import candidates_from_seed_table, seed_from_papyrus
+from molecule_gen.generate.seed import (
+    candidates_from_seed_table,
+    seed_from_papyrus,
+    seed_papyrus_near_misses,
+)
 from molecule_gen.paths import PROCESSED_DIR, PROJECT_ROOT, ensure_processed_dir
 
 DEFAULT_POPULATION = 64
 DEFAULT_GENERATIONS = 20
+DEFAULT_NEAR_MISS_FRAC = 0.5
 HITS_PARQUET = "generate_hits.parquet"
 HITS_MANIFEST = "generate_manifest.json"
 
@@ -63,6 +68,91 @@ def candidates_from_smiles_list(
         if result is not None:
             rows.append(result)
     return rows
+
+
+def _dedupe_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = str(row.get("inchikey") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def _population_from_transformer(
+    spec: ConstraintSpec,
+    *,
+    n_seeds: int,
+    seed: int,
+    checkpoint: Path | None,
+    evaluate_fn,
+    sample_fn,
+    on_progress,
+    mix_near_misses: bool,
+    near_miss_frac: float,
+) -> tuple[list[dict[str, Any]], int, int]:
+    from molecule_gen.generate.chemistry import is_reasonable_molecule
+    from molecule_gen.generate.sample import sample_valid_smiles
+
+    use_near = (
+        mix_near_misses
+        and evaluate_fn is None
+        and sample_fn is None
+        and 0 < near_miss_frac < 1
+    )
+    n_near = int(round(n_seeds * near_miss_frac)) if use_near else 0
+    n_gpt = max(1, n_seeds - n_near) if n_near else n_seeds
+
+    message = f"sampling {n_gpt} seeds from the SELFIES GPT"
+    print(message, file=sys.stderr, flush=True)
+    if on_progress is not None:
+        on_progress({"type": "sampling", "message": message, "n_seeds": n_gpt})
+    sampled = sample_valid_smiles(
+        n_gpt * 2 if sample_fn is None else n_gpt,
+        checkpoint=checkpoint,
+        seed=seed,
+        sample_fn=sample_fn,
+    )
+    if sample_fn is None:
+        sampled = [smi for smi in sampled if is_reasonable_molecule(smi)][:n_gpt]
+    else:
+        sampled = sampled[:n_gpt]
+    if on_progress is not None:
+        on_progress(
+            {
+                "type": "sampled",
+                "message": f"kept {len(sampled)} chemically reasonable GPT seeds",
+                "n_seeds": len(sampled),
+            }
+        )
+    gpt_rows = candidates_from_smiles_list(
+        sampled, spec, evaluate_fn=evaluate_fn, origin="transformer"
+    )
+
+    near_rows: list[dict[str, Any]] = []
+    if n_near:
+        try:
+            table = seed_papyrus_near_misses(spec, n_seeds=n_near, seed=seed)
+            near_rows = candidates_from_seed_table(
+                table,
+                origin="near_miss",
+                require_reasonable=True,
+                limit=n_near,
+            )
+            msg = f"mixed in {len(near_rows)} Papyrus near-miss seeds"
+            print(msg, file=sys.stderr, flush=True)
+            if on_progress is not None:
+                on_progress({"type": "near_miss", "message": msg, "n_seeds": len(near_rows)})
+        except FileNotFoundError as exc:
+            print(f"near-miss seeds skipped: {exc}", file=sys.stderr, flush=True)
+
+    population = _dedupe_candidates(near_rows + gpt_rows)
+    if len(population) < n_seeds and gpt_rows and not near_rows:
+        population = gpt_rows
+    return population, len(gpt_rows), len(near_rows)
 
 
 def hits_to_frame(hits: list[dict[str, Any]], spec: ConstraintSpec) -> pd.DataFrame:
@@ -137,41 +227,39 @@ def generate_molecules(
     evaluate_fn=None,
     sample_fn=None,
     on_progress=None,
+    mix_near_misses: bool = True,
+    near_miss_frac: float = DEFAULT_NEAR_MISS_FRAC,
 ) -> dict[str, Any]:
-    """Seed from the SELFIES GPT (default), Papyrus, or given SMILES; evolve if needed."""
+    """Seed from the SELFIES GPT mixed with Papyrus near-misses; evolve if needed."""
     ensure_processed_dir()
     rng = Random(seed)
     n_seeds = max(population_size, spec.n)
     prior_name = (prior or "transformer").strip().lower()
+    n_gpt_seeds = 0
+    n_near_miss_seeds = 0
     if smiles_seeds:
         population = candidates_from_smiles_list(
             smiles_seeds, spec, evaluate_fn=evaluate_fn, origin="seed"
         )
         prior_name = "smiles"
     elif prior_name == "transformer":
-        from molecule_gen.generate.sample import sample_valid_smiles
-
-        message = f"sampling {n_seeds} seeds from the SELFIES GPT"
-        print(message, file=sys.stderr, flush=True)
-        if on_progress is not None:
-            on_progress({"type": "sampling", "message": message, "n_seeds": n_seeds})
-        sampled = sample_valid_smiles(
-            n_seeds, checkpoint=checkpoint, seed=seed, sample_fn=sample_fn
+        population, n_gpt_seeds, n_near_miss_seeds = _population_from_transformer(
+            spec,
+            n_seeds=n_seeds,
+            seed=seed,
+            checkpoint=checkpoint,
+            evaluate_fn=evaluate_fn,
+            sample_fn=sample_fn,
+            on_progress=on_progress,
+            mix_near_misses=mix_near_misses,
+            near_miss_frac=near_miss_frac,
         )
-        if on_progress is not None:
-            on_progress(
-                {
-                    "type": "sampled",
-                    "message": f"scored {len(sampled)} GPT seeds against the spec",
-                    "n_seeds": len(sampled),
-                }
-            )
-        population = candidates_from_smiles_list(
-            sampled, spec, evaluate_fn=evaluate_fn, origin="transformer"
-        )
+        if n_near_miss_seeds:
+            prior_name = "transformer+near_miss"
     elif prior_name == "papyrus":
         table = seed_from_papyrus(spec, n_seeds=n_seeds, seed=seed)
         population = candidates_from_seed_table(table)
+        n_near_miss_seeds = sum(1 for row in population if not row["in_range"])
     else:
         raise ValueError(f"Unknown prior {prior!r}. Use 'papyrus' or 'transformer'.")
     if not population:
@@ -212,6 +300,8 @@ def generate_molecules(
         "generations": generations,
         "seed": seed,
         "prior": prior_name,
+        "n_gpt_seeds": n_gpt_seeds,
+        "n_near_miss_seeds": n_near_miss_seeds,
         "spec": spec.as_dict(),
         "output_parquet": _relpath(dest) if dest.exists() else None,
     }

@@ -77,7 +77,14 @@ def mutate_selfies(
     max_tokens: int = MAX_SELFIES_TOKENS,
 ) -> str:
     tokens = split_selfies(selfies)
-    symbols = alphabet or robust_alphabet()
+    if alphabet is None:
+        from molecule_gen.generate.chemistry import mutation_alphabet
+
+        symbols = mutation_alphabet()
+    else:
+        symbols = alphabet
+    if not symbols:
+        return selfies
     if not symbols:
         return selfies
     if not tokens:

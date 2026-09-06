@@ -11,6 +11,7 @@ from molecule_gen.constraints.score import score_vector
 from molecule_gen.constraints.spec import ConstraintSpec
 from molecule_gen.data.clean import canonicalize_smiles, connectivity_from_inchikey
 from molecule_gen.descriptors.cache import DescriptorCache
+from molecule_gen.generate.chemistry import is_reasonable_molecule
 from molecule_gen.generate.selfies_util import (
     crossover_selfies,
     mutate_selfies,
@@ -53,11 +54,14 @@ def evaluate_smiles(
     allow_papyrus: bool = False,
     generation: int = 0,
     origin: str = "mutant",
+    require_reasonable: bool = False,
 ) -> dict[str, Any] | None:
     parsed = canonicalize_smiles(smiles)
     if parsed is None:
         return None
     canon, inchikey = parsed
+    if require_reasonable and not is_reasonable_molecule(canon):
+        return None
     encoded = smiles_to_selfies(canon)
     if encoded is None:
         return None
@@ -130,6 +134,7 @@ def evolve(
             allow_papyrus=False,
             generation=generation,
             origin=origin,
+            require_reasonable=True,
         )
 
     try:
@@ -175,7 +180,7 @@ def evolve(
             needed = max(0, population_size - len(elites))
             children: list[dict[str, Any]] = []
             attempts = 0
-            max_attempts = max(200, needed * 20)
+            max_attempts = max(400, needed * 40)
             bar = tqdm(
                 total=needed,
                 desc=f"gen {gen}",
@@ -196,6 +201,8 @@ def evolve(
                         child_sf = mutate_selfies(parent["selfies"], rng)
                     child_smiles = selfies_to_canonical_smiles(child_sf)
                     if child_smiles is None:
+                        continue
+                    if not is_reasonable_molecule(child_smiles):
                         continue
                     child = evaluate(child_smiles, gen, "mutant")
                     if child is None or child["inchikey"] in seen:

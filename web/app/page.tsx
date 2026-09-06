@@ -321,7 +321,7 @@ export default function HomePage() {
               <input
                 type="number"
                 min={0}
-                max={200}
+                max={1000}
                 value={generations}
                 onChange={(e) => setGenerations(Number(e.target.value))}
               />

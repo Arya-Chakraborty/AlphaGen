@@ -70,7 +70,7 @@ Output:
 
 ## Phase 4 — generate (SELFIES GPT + GA)
 
-Default seeds come from the trained SELFIES GPT. The GA then steers them into the Mordred ranges.
+Default seeds come from the trained SELFIES GPT mixed with Papyrus **near-misses** (molecules that miss the box by a little). Mutations stay in ordinary organic chemistry (no boron, no formal charges). `--no-near-miss` uses the GPT only. `--prior papyrus` restores lookup-first seeding.
 
 ```bash
 python -m molecule_gen generate --spec examples/tight.json

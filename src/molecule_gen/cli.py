@@ -210,6 +210,11 @@ def main(argv: list[str] | None = None) -> None:
         help="SELFIES GPT checkpoint (default checkpoints/selfies_gpt.pt).",
     )
     generate.add_argument(
+        "--no-near-miss",
+        action="store_true",
+        help="Do not mix Papyrus near-misses into transformer seeds.",
+    )
+    generate.add_argument(
         "--out",
         default=None,
         help="Output parquet path (default data/processed/generate_hits.parquet).",
@@ -373,6 +378,7 @@ def main(argv: list[str] | None = None) -> None:
             smiles_seeds=parse_smiles_seeds(args.smiles),
             prior=args.prior,
             checkpoint=Path(args.checkpoint) if args.checkpoint else None,
+            mix_near_misses=not args.no_near_miss,
             out_path=Path(args.out) if args.out else None,
         )
         print(json.dumps(manifest, indent=2))

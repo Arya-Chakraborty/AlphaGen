@@ -8,7 +8,8 @@ __pycache__/
 data/**
 !data/.gitkeep
 
-checkpoints/
+checkpoints/*
+!checkpoints/selfies_gpt.pt
 *.parquet
 web/node_modules/
 web/.next/
