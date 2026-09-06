@@ -1,0 +1,10 @@
+{
+  "n": 5,
+  "descriptors": {
+    "SLogP": {"min": 2.8, "max": 3.2},
+    "MW": {"min": 360, "max": 390},
+    "TopoPSA": {"min": 70, "max": 90},
+    "nRot": {"min": 4, "max": 5},
+    "nRing": {"min": 3, "max": 3}
+  }
+}

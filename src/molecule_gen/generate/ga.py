@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import sys
+from random import Random
+from typing import Any, Callable
+
+from tqdm import tqdm
+
+from molecule_gen.constraints.lookup import LookupError, describe_for_scoring
+from molecule_gen.constraints.score import score_vector
+from molecule_gen.constraints.spec import ConstraintSpec
+from molecule_gen.data.clean import canonicalize_smiles, connectivity_from_inchikey
+from molecule_gen.descriptors.cache import DescriptorCache
+from molecule_gen.generate.selfies_util import (
+    crossover_selfies,
+    mutate_selfies,
+    selfies_to_canonical_smiles,
+    smiles_to_selfies,
+)
+
+EvaluateFn = Callable[[str], dict[str, Any] | None]
+ProgressFn = Callable[[dict[str, Any]], None]
+
+
+def candidate_preview(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not candidate:
+        return None
+    return {
+        "canonical_smiles": candidate.get("canonical_smiles"),
+        "inchikey": candidate.get("inchikey"),
+        "penalty": candidate.get("penalty"),
+        "in_range": candidate.get("in_range"),
+        "n_passed": candidate.get("n_passed"),
+        "generation": candidate.get("generation", 0),
+        "origin": candidate.get("origin"),
+        "values": candidate.get("values") or {},
+    }
+
+
+def _emit(on_progress: ProgressFn | None, event: dict[str, Any]) -> None:
+    message = event.get("message")
+    if message:
+        print(message, file=sys.stderr, flush=True)
+    if on_progress is not None:
+        on_progress(event)
+
+
+def evaluate_smiles(
+    smiles: str,
+    spec: ConstraintSpec,
+    *,
+    cache: DescriptorCache | None = None,
+    allow_papyrus: bool = False,
+    generation: int = 0,
+    origin: str = "mutant",
+) -> dict[str, Any] | None:
+    parsed = canonicalize_smiles(smiles)
+    if parsed is None:
+        return None
+    canon, inchikey = parsed
+    encoded = smiles_to_selfies(canon)
+    if encoded is None:
+        return None
+    connectivity = connectivity_from_inchikey(inchikey)
+    try:
+        values, source = describe_for_scoring(
+            names=spec.names(),
+            smiles=canon,
+            inchikey=inchikey,
+            connectivity=connectivity,
+            cache=cache,
+            allow_papyrus=allow_papyrus,
+        )
+    except LookupError:
+        return None
+    scored = score_vector(values, spec)
+    return {
+        "canonical_smiles": canon,
+        "selfies": encoded,
+        "inchikey": inchikey,
+        "connectivity": connectivity,
+        "values": {name: scored["descriptors"][name]["value"] for name in spec.names()},
+        "penalty": scored["penalty"],
+        "in_range": scored["in_range"],
+        "n_passed": scored["n_passed"],
+        "source": source,
+        "origin": origin,
+        "generation": generation,
+    }
+
+
+def _fitness(candidate: dict[str, Any]) -> tuple[int, float]:
+    return (0 if candidate["in_range"] else 1, float(candidate["penalty"]))
+
+
+def evolve(
+    spec: ConstraintSpec,
+    seeds: list[dict[str, Any]],
+    *,
+    population_size: int = 64,
+    generations: int = 20,
+    elite_frac: float = 0.25,
+    crossover_p: float = 0.3,
+    rng: Random | None = None,
+    cache: DescriptorCache | None = None,
+    evaluate_fn: EvaluateFn | None = None,
+    on_progress: ProgressFn | None = None,
+) -> list[dict[str, Any]]:
+    """Evolve SELFIES until spec.n in-range molecules exist or generations run out."""
+    rng = rng or Random(0)
+    owned = False
+    store = cache
+    if store is None and evaluate_fn is None:
+        store = DescriptorCache()
+        owned = True
+
+    def evaluate(smiles: str, generation: int, origin: str) -> dict[str, Any] | None:
+        if evaluate_fn is not None:
+            result = evaluate_fn(smiles)
+            if result is None:
+                return None
+            result = dict(result)
+            result["generation"] = generation
+            result["origin"] = origin
+            return result
+        return evaluate_smiles(
+            smiles,
+            spec,
+            cache=store,
+            allow_papyrus=False,
+            generation=generation,
+            origin=origin,
+        )
+
+    try:
+        hits: dict[str, dict[str, Any]] = {}
+        seen: set[str] = set()
+        population: list[dict[str, Any]] = []
+        for cand in seeds:
+            key = cand["inchikey"]
+            if key in seen:
+                continue
+            seen.add(key)
+            population.append(cand)
+            if cand["in_range"]:
+                hits[key] = cand
+        ranked = sorted(population, key=_fitness)
+        _emit(
+            on_progress,
+            {
+                "type": "ga_start",
+                "message": (
+                    f"GA start: {len(population)} seeds, {len(hits)} already in range "
+                    f"(need {spec.n})"
+                ),
+                "generation": 0,
+                "n_seeds": len(population),
+                "n_hits": len(hits),
+                "n_requested": spec.n,
+                "best_penalty": ranked[0]["penalty"] if ranked else None,
+                "best": candidate_preview(ranked[0] if ranked else None),
+                "population": [candidate_preview(row) for row in ranked[:8]],
+                "hits": [candidate_preview(row) for row in hits.values()],
+            },
+        )
+        if len(hits) >= spec.n or generations <= 0:
+            return list(hits.values())[: spec.n]
+
+        n_elite = max(2, int(population_size * elite_frac))
+        for gen in range(1, generations + 1):
+            if len(hits) >= spec.n:
+                break
+            population.sort(key=_fitness)
+            elites = population[: min(n_elite, len(population))]
+            needed = max(0, population_size - len(elites))
+            children: list[dict[str, Any]] = []
+            attempts = 0
+            max_attempts = max(200, needed * 20)
+            bar = tqdm(
+                total=needed,
+                desc=f"gen {gen}",
+                unit="mol",
+                file=sys.stderr,
+                leave=False,
+            )
+            try:
+                while len(children) < needed and attempts < max_attempts:
+                    attempts += 1
+                    parent = rng.choice(elites)
+                    if rng.random() < crossover_p and len(elites) >= 2:
+                        other = rng.choice(elites)
+                        child_sf = crossover_selfies(
+                            parent["selfies"], other["selfies"], rng
+                        )
+                    else:
+                        child_sf = mutate_selfies(parent["selfies"], rng)
+                    child_smiles = selfies_to_canonical_smiles(child_sf)
+                    if child_smiles is None:
+                        continue
+                    child = evaluate(child_smiles, gen, "mutant")
+                    if child is None or child["inchikey"] in seen:
+                        continue
+                    seen.add(child["inchikey"])
+                    children.append(child)
+                    if child["in_range"]:
+                        hits[child["inchikey"]] = child
+                    bar.update(1)
+                    bar.set_postfix(hits=len(hits), penalty=f"{child['penalty']:.3f}")
+            finally:
+                bar.close()
+            population = elites + children
+            ranked = sorted(population, key=_fitness)
+            best = ranked[0] if ranked else None
+            best_pen = f"{best['penalty']:.4f}" if best else "?"
+            _emit(
+                on_progress,
+                {
+                    "type": "generation",
+                    "message": (
+                        f"generation {gen}: pop={len(population)} hits={len(hits)} "
+                        f"best_penalty={best_pen}"
+                    ),
+                    "generation": gen,
+                    "n_population": len(population),
+                    "n_hits": len(hits),
+                    "n_requested": spec.n,
+                    "best_penalty": best["penalty"] if best else None,
+                    "best": candidate_preview(best),
+                    "population": [candidate_preview(row) for row in ranked[:8]],
+                    "hits": [candidate_preview(row) for row in hits.values()],
+                },
+            )
+        return list(hits.values())[: spec.n]
+    finally:
+        if owned and store is not None:
+            store.close()

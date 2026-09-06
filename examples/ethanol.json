@@ -1,0 +1,10 @@
+{
+  "n": 1,
+  "descriptors": {
+    "SLogP": {"min": -1.0, "max": 0.5},
+    "MW": {"min": 40.0, "max": 50.0},
+    "nAtom": {"min": 8, "max": 10},
+    "nHeavyAtom": {"min": 3, "max": 3},
+    "nHBDon": {"min": 1, "max": 1}
+  }
+}
