@@ -12,6 +12,8 @@ from molecule_gen.constraints.spec import ConstraintSpec
 from molecule_gen.data.clean import canonicalize_smiles, connectivity_from_inchikey
 from molecule_gen.descriptors.cache import DescriptorCache
 from molecule_gen.generate.chemistry import is_reasonable_molecule
+from molecule_gen.generate.diversity import diverse_elites
+from molecule_gen.generate.local_edits import local_edit_smiles
 from molecule_gen.generate.selfies_util import (
     crossover_selfies,
     mutate_selfies,
@@ -21,6 +23,13 @@ from molecule_gen.generate.selfies_util import (
 
 EvaluateFn = Callable[[str], dict[str, Any] | None]
 ProgressFn = Callable[[dict[str, Any]], None]
+ImmigrantFn = Callable[[int, dict[str, Any] | None, set[str]], list[dict[str, Any]]]
+
+CLOSE_PENALTY = 0.01
+CLOSE_STREAK = 3
+STAGNATION_STREAK = 8
+STAGNATION_EPS = 1e-6
+LOCAL_EDIT_P = 1.0
 
 
 def candidate_preview(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -109,6 +118,7 @@ def evolve(
     cache: DescriptorCache | None = None,
     evaluate_fn: EvaluateFn | None = None,
     on_progress: ProgressFn | None = None,
+    immigrant_fn: ImmigrantFn | None = None,
 ) -> list[dict[str, Any]]:
     """Evolve SELFIES until spec.n in-range molecules exist or generations run out."""
     rng = rng or Random(0)
@@ -172,13 +182,55 @@ def evolve(
             return list(hits.values())[: spec.n]
 
         n_elite = max(2, int(population_size * elite_frac))
+        prev_best: float | None = None
+        stagnant_streak = 0
+        close_streak = 0
         for gen in range(1, generations + 1):
             if len(hits) >= spec.n:
                 break
             population.sort(key=_fitness)
-            elites = population[: min(n_elite, len(population))]
+            elites = diverse_elites(population, min(n_elite, len(population)))
+            if len(elites) < 2 and population:
+                elites = population[: min(n_elite, len(population))]
             needed = max(0, population_size - len(elites))
             children: list[dict[str, Any]] = []
+            use_local = close_streak >= CLOSE_STREAK
+            if (
+                immigrant_fn is not None
+                and stagnant_streak >= STAGNATION_STREAK
+                and needed > 0
+            ):
+                n_imm = min(needed, max(1, needed // 2))
+                best_now = population[0] if population else None
+                raw = immigrant_fn(n_imm, best_now, seen)
+                injected = 0
+                for cand in raw:
+                    key = cand.get("inchikey")
+                    if not key or key in seen:
+                        continue
+                    row = dict(cand)
+                    row["generation"] = gen
+                    row.setdefault("origin", "immigrant")
+                    seen.add(key)
+                    children.append(row)
+                    if row.get("in_range"):
+                        hits[key] = row
+                    injected += 1
+                    if len(children) >= n_imm:
+                        break
+                stagnant_streak = 0
+                _emit(
+                    on_progress,
+                    {
+                        "type": "diversity",
+                        "message": (
+                            f"generation {gen}: injected {injected} diverse immigrants "
+                            f"(stagnation)"
+                        ),
+                        "generation": gen,
+                        "n_hits": len(hits),
+                    },
+                )
             attempts = 0
             max_attempts = max(400, needed * 40)
             bar = tqdm(
@@ -189,22 +241,32 @@ def evolve(
                 leave=False,
             )
             try:
+                bar.update(len(children))
                 while len(children) < needed and attempts < max_attempts:
                     attempts += 1
                     parent = rng.choice(elites)
-                    if rng.random() < crossover_p and len(elites) >= 2:
-                        other = rng.choice(elites)
-                        child_sf = crossover_selfies(
-                            parent["selfies"], other["selfies"], rng
+                    child_smiles = None
+                    origin = "mutant"
+                    if use_local and rng.random() < LOCAL_EDIT_P:
+                        child_smiles = local_edit_smiles(
+                            str(parent.get("canonical_smiles") or ""), rng
                         )
-                    else:
-                        child_sf = mutate_selfies(parent["selfies"], rng)
-                    child_smiles = selfies_to_canonical_smiles(child_sf)
+                        origin = "local_edit"
+                    if child_smiles is None:
+                        origin = "mutant"
+                        if rng.random() < crossover_p and len(elites) >= 2:
+                            other = rng.choice(elites)
+                            child_sf = crossover_selfies(
+                                parent["selfies"], other["selfies"], rng
+                            )
+                        else:
+                            child_sf = mutate_selfies(parent["selfies"], rng)
+                        child_smiles = selfies_to_canonical_smiles(child_sf)
                     if child_smiles is None:
                         continue
                     if not is_reasonable_molecule(child_smiles):
                         continue
-                    child = evaluate(child_smiles, gen, "mutant")
+                    child = evaluate(child_smiles, gen, origin)
                     if child is None or child["inchikey"] in seen:
                         continue
                     seen.add(child["inchikey"])
@@ -218,23 +280,41 @@ def evolve(
             population = elites + children
             ranked = sorted(population, key=_fitness)
             best = ranked[0] if ranked else None
-            best_pen = f"{best['penalty']:.4f}" if best else "?"
+            best_pen_value = float(best["penalty"]) if best else None
+            if best_pen_value is not None and best_pen_value < CLOSE_PENALTY:
+                close_streak += 1
+            else:
+                close_streak = 0
+            if (
+                prev_best is not None
+                and best_pen_value is not None
+                and abs(best_pen_value - prev_best) < STAGNATION_EPS
+            ):
+                stagnant_streak += 1
+            else:
+                stagnant_streak = 0
+            prev_best = best_pen_value
+            best_pen = f"{best_pen_value:.4f}" if best_pen_value is not None else "?"
+            mode = "local" if use_local else "selfies"
             _emit(
                 on_progress,
                 {
                     "type": "generation",
                     "message": (
                         f"generation {gen}: pop={len(population)} hits={len(hits)} "
-                        f"best_penalty={best_pen}"
+                        f"best_penalty={best_pen} mode={mode}"
                     ),
                     "generation": gen,
                     "n_population": len(population),
                     "n_hits": len(hits),
                     "n_requested": spec.n,
-                    "best_penalty": best["penalty"] if best else None,
+                    "best_penalty": best_pen_value,
                     "best": candidate_preview(best),
                     "population": [candidate_preview(row) for row in ranked[:8]],
                     "hits": [candidate_preview(row) for row in hits.values()],
+                    "mode": mode,
+                    "close_streak": close_streak,
+                    "stagnant_streak": stagnant_streak,
                 },
             )
         return list(hits.values())[: spec.n]

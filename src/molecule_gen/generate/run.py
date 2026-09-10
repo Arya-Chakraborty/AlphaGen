@@ -93,7 +93,7 @@ def _population_from_transformer(
     on_progress,
     mix_near_misses: bool,
     near_miss_frac: float,
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], int, int, list[dict[str, Any]]]:
     from molecule_gen.generate.chemistry import is_reasonable_molecule
     from molecule_gen.generate.sample import sample_valid_smiles
 
@@ -133,15 +133,18 @@ def _population_from_transformer(
     )
 
     near_rows: list[dict[str, Any]] = []
+    near_pool: list[dict[str, Any]] = []
     if n_near:
         try:
             table = seed_papyrus_near_misses(spec, n_seeds=n_near, seed=seed)
-            near_rows = candidates_from_seed_table(
+            encoded = candidates_from_seed_table(
                 table,
                 origin="near_miss",
                 require_reasonable=True,
-                limit=n_near,
+                limit=n_near + 64,
             )
+            near_rows = encoded[:n_near]
+            near_pool = encoded[n_near:]
             msg = f"mixed in {len(near_rows)} Papyrus near-miss seeds"
             print(msg, file=sys.stderr, flush=True)
             if on_progress is not None:
@@ -152,7 +155,80 @@ def _population_from_transformer(
     population = _dedupe_candidates(near_rows + gpt_rows)
     if len(population) < n_seeds and gpt_rows and not near_rows:
         population = gpt_rows
-    return population, len(gpt_rows), len(near_rows)
+    return population, len(gpt_rows), len(near_rows), near_pool
+
+
+def _make_immigrant_fn(
+    spec: ConstraintSpec,
+    *,
+    checkpoint: Path | None,
+    seed: int,
+    evaluate_fn,
+    sample_fn,
+    pool: list[dict[str, Any]],
+):
+    from molecule_gen.generate.chemistry import is_reasonable_molecule
+    from molecule_gen.generate.diversity import failed_descriptor_names
+
+    counter = {"n": seed}
+
+    def immigrant_fn(n: int, stuck, seen: set[str]) -> list[dict[str, Any]]:
+        if n <= 0:
+            return []
+        stuck_failed = failed_descriptor_names(stuck, spec)
+        picked: list[dict[str, Any]] = []
+        ranked = sorted(
+            pool,
+            key=lambda row: (
+                failed_descriptor_names(row, spec) == stuck_failed,
+                float(row.get("penalty", 1e9)),
+            ),
+        )
+        for row in ranked:
+            key = row.get("inchikey")
+            if not key or key in seen:
+                continue
+            row_failed = failed_descriptor_names(row, spec)
+            if stuck_failed and row_failed == stuck_failed:
+                continue
+            picked.append(dict(row))
+            if len(picked) >= max(1, n // 2):
+                break
+        need = n - len(picked)
+        if need <= 0:
+            return picked[:n]
+        counter["n"] += 17
+        try:
+            from molecule_gen.generate.sample import sample_valid_smiles
+            from molecule_gen.generate.transformer import TransformerError
+
+            sampled = sample_valid_smiles(
+                need,
+                checkpoint=checkpoint,
+                seed=counter["n"],
+                sample_fn=sample_fn,
+                max_draws=max(need * 8, need),
+            )
+        except (TransformerError, FileNotFoundError, Exception):
+            sampled = []
+        if sample_fn is None:
+            sampled = [smi for smi in sampled if is_reasonable_molecule(smi)]
+        gpt_rows = candidates_from_smiles_list(
+            sampled, spec, evaluate_fn=evaluate_fn, origin="immigrant"
+        )
+        have = {row.get("inchikey") for row in picked}
+        have.update(seen)
+        for row in gpt_rows:
+            key = row.get("inchikey")
+            if not key or key in have:
+                continue
+            picked.append(row)
+            have.add(key)
+            if len(picked) >= n:
+                break
+        return picked[:n]
+
+    return immigrant_fn
 
 
 def hits_to_frame(hits: list[dict[str, Any]], spec: ConstraintSpec) -> pd.DataFrame:
@@ -237,22 +313,25 @@ def generate_molecules(
     prior_name = (prior or "transformer").strip().lower()
     n_gpt_seeds = 0
     n_near_miss_seeds = 0
+    immigrant_pool: list[dict[str, Any]] = []
     if smiles_seeds:
         population = candidates_from_smiles_list(
             smiles_seeds, spec, evaluate_fn=evaluate_fn, origin="seed"
         )
         prior_name = "smiles"
     elif prior_name == "transformer":
-        population, n_gpt_seeds, n_near_miss_seeds = _population_from_transformer(
-            spec,
-            n_seeds=n_seeds,
-            seed=seed,
-            checkpoint=checkpoint,
-            evaluate_fn=evaluate_fn,
-            sample_fn=sample_fn,
-            on_progress=on_progress,
-            mix_near_misses=mix_near_misses,
-            near_miss_frac=near_miss_frac,
+        population, n_gpt_seeds, n_near_miss_seeds, immigrant_pool = (
+            _population_from_transformer(
+                spec,
+                n_seeds=n_seeds,
+                seed=seed,
+                checkpoint=checkpoint,
+                evaluate_fn=evaluate_fn,
+                sample_fn=sample_fn,
+                on_progress=on_progress,
+                mix_near_misses=mix_near_misses,
+                near_miss_frac=near_miss_frac,
+            )
         )
         if n_near_miss_seeds:
             prior_name = "transformer+near_miss"
@@ -273,6 +352,14 @@ def generate_molecules(
         rng=rng,
         evaluate_fn=evaluate_fn,
         on_progress=on_progress,
+        immigrant_fn=_make_immigrant_fn(
+            spec,
+            checkpoint=checkpoint,
+            seed=seed,
+            evaluate_fn=evaluate_fn,
+            sample_fn=sample_fn,
+            pool=immigrant_pool,
+        ),
     )
     frame = hits_to_frame(hits, spec)
     dest = out_path or hits_parquet_path()
