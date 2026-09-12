@@ -2,7 +2,7 @@
 
 Generate molecules that match user-specified **Mordred 2D** descriptor ranges.
 
-A third-person architecture writeup (data, SELFIES GPT training, genetic algorithm, scoring) is in [`ARCHITECTURE.md`](ARCHITECTURE.md). Papyrus 05.7 is the training / lookup corpus. See `PLAN.md` for the build order.
+Papyrus 05.7 is the training / lookup corpus. See `PLAN.md` for the full build order.
 
 Papyrus is CC BY-SA 4.0 ([doi:10.5281/zenodo.13987985](https://doi.org/10.5281/zenodo.13987985)).
 
