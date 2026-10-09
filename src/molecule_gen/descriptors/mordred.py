@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 from tqdm import tqdm
@@ -59,7 +61,7 @@ def _to_float(value: object) -> float | None:
     if text == "" or text.lower() in {"nan", "na", "none", "null", "inf", "-inf"}:
         return None
     try:
-        from mordred.error import Missing, Error
+        from mordred.error import Error, Missing
 
         if isinstance(value, (Missing, Error)):
             return None
@@ -82,17 +84,36 @@ def _calculator():
     return Calculator(descriptors, ignore_3D=True)
 
 
+@lru_cache(maxsize=32)
+def _subset_calculator(names: tuple[str, ...]):
+    from mordred import Calculator
+
+    wanted = set(names)
+    calc = Calculator(ignore_3D=True)
+    calc.register([desc for desc in _all_descriptors() if str(desc) in wanted])
+    return calc
+
+
+@lru_cache(maxsize=1)
+def _all_descriptors():
+    return tuple(_calculator().descriptors)
+
+
 def descriptor_names() -> list[str]:
     return [str(desc) for desc in _calculator().descriptors]
 
 
-def mordred_from_smiles_batch(smiles_list: list[str]) -> list[dict[str, float | None] | None]:
-    """Compute Mordred 2D descriptors for each SMILES. None if the molecule is invalid."""
-    from rdkit import Chem
-    from rdkit import RDLogger
+def mordred_from_smiles_batch(
+    smiles_list: list[str], names: list[str] | None = None
+) -> list[dict[str, float | None] | None]:
+    """Compute Mordred 2D descriptors for each SMILES. None if the molecule is invalid.
+
+    `names` restricts the calculation to those descriptors (default: all).
+    """
+    from rdkit import Chem, RDLogger
 
     RDLogger.DisableLog("rdApp.*")
-    calc = _calculator()
+    calc = _subset_calculator(tuple(sorted(set(names)))) if names else _calculator()
     rows: list[dict[str, float | None] | None] = []
     for smiles in smiles_list:
         mol = Chem.MolFromSmiles(smiles)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import traceback
 import uuid
 from typing import Any
@@ -66,6 +67,7 @@ class GenerateJob:
 
     def emit(self, event: dict[str, Any]) -> None:
         clean = _jsonable(event)
+        clean["ts"] = time.time()
         with self.lock:
             self.history.append(clean)
             if clean.get("type") == "done":
@@ -75,6 +77,10 @@ class GenerateJob:
             elif clean.get("type") == "error":
                 self.error = str(clean.get("message") or "generation failed")
                 self.status = "error"
+
+    def snapshot_history(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.history)
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timezone
+from math import isnan
 from pathlib import Path
 from random import Random
+from time import perf_counter
 from typing import Any
 
 import pandas as pd
@@ -13,6 +15,7 @@ from molecule_gen.constraints.score import score_vector
 from molecule_gen.constraints.spec import ConstraintSpec
 from molecule_gen.data.clean import connectivity_from_inchikey
 from molecule_gen.generate.ga import evolve
+from molecule_gen.generate.plausibility import unseen_fraction
 from molecule_gen.generate.seed import (
     candidates_from_seed_table,
     seed_from_papyrus,
@@ -20,7 +23,7 @@ from molecule_gen.generate.seed import (
 )
 from molecule_gen.paths import PROCESSED_DIR, PROJECT_ROOT, ensure_processed_dir
 
-DEFAULT_POPULATION = 64
+DEFAULT_POPULATION = 32
 DEFAULT_GENERATIONS = 20
 DEFAULT_NEAR_MISS_FRAC = 0.5
 HITS_PARQUET = "generate_hits.parquet"
@@ -148,7 +151,9 @@ def _population_from_transformer(
             msg = f"mixed in {len(near_rows)} Papyrus near-miss seeds"
             print(msg, file=sys.stderr, flush=True)
             if on_progress is not None:
-                on_progress({"type": "near_miss", "message": msg, "n_seeds": len(near_rows)})
+                on_progress(
+                    {"type": "near_miss", "message": msg, "n_seeds": len(near_rows)}
+                )
         except FileNotFoundError as exc:
             print(f"near-miss seeds skipped: {exc}", file=sys.stderr, flush=True)
 
@@ -231,6 +236,12 @@ def _make_immigrant_fn(
     return immigrant_fn
 
 
+def _opt_float(value: Any) -> float | None:
+    if value is None or (isinstance(value, float) and isnan(value)):
+        return None
+    return float(value)
+
+
 def hits_to_frame(hits: list[dict[str, Any]], spec: ConstraintSpec) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
     for hit in hits:
@@ -254,6 +265,7 @@ def hits_to_frame(hits: list[dict[str, Any]], spec: ConstraintSpec) -> pd.DataFr
             "source": hit.get("source"),
             "origin": hit.get("origin"),
             "generation": hit.get("generation", 0),
+            "unseen_frac": unseen_fraction(hit.get("canonical_smiles")),
         }
         for name in spec.names():
             record[f"value_{name}"] = scored["descriptors"][name]["value"]
@@ -262,7 +274,9 @@ def hits_to_frame(hits: list[dict[str, Any]], spec: ConstraintSpec) -> pd.DataFr
     if not records:
         return pd.DataFrame()
     frame = pd.DataFrame.from_records(records)
-    return frame.drop_duplicates(subset=["inchikey"], keep="first").reset_index(drop=True)
+    return frame.drop_duplicates(subset=["inchikey"], keep="first").reset_index(
+        drop=True
+    )
 
 
 def hits_to_records(frame: pd.DataFrame, spec: ConstraintSpec) -> list[dict[str, Any]]:
@@ -283,6 +297,7 @@ def hits_to_records(frame: pd.DataFrame, spec: ConstraintSpec) -> list[dict[str,
                 "source": rec.get("source"),
                 "origin": rec.get("origin"),
                 "generation": rec.get("generation", 0),
+                "unseen_frac": _opt_float(rec.get("unseen_frac")),
                 "values": values,
                 "passed": passed,
             }
@@ -308,6 +323,7 @@ def generate_molecules(
 ) -> dict[str, Any]:
     """Seed from the SELFIES GPT mixed with Papyrus near-misses; evolve if needed."""
     ensure_processed_dir()
+    started = perf_counter()
     rng = Random(seed)
     n_seeds = max(population_size, spec.n)
     prior_name = (prior or "transformer").strip().lower()
@@ -361,6 +377,7 @@ def generate_molecules(
             pool=immigrant_pool,
         ),
     )
+    elapsed = round(perf_counter() - started, 2)
     frame = hits_to_frame(hits, spec)
     dest = out_path or hits_parquet_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -370,10 +387,8 @@ def generate_molecules(
         if dest.exists():
             dest.unlink()
 
-    print(
-        f"kept {len(frame)} unique in-range molecules (requested {spec.n})",
-        file=sys.stderr,
-    )
+    summary = f"kept {len(frame)} unique in-range molecules (requested {spec.n}) in {elapsed:g}s"
+    print(summary, file=sys.stderr)
     if not frame.empty:
         print(f"wrote {dest}", file=sys.stderr)
 
@@ -381,6 +396,7 @@ def generate_molecules(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "n_requested": spec.n,
         "n_hits": int(len(frame)),
+        "elapsed_s": elapsed,
         "n_seeds": len(population),
         "n_seed_in_range": sum(1 for row in population if row["in_range"]),
         "population_size": population_size,
@@ -397,9 +413,7 @@ def generate_molecules(
         on_progress(
             {
                 "type": "done",
-                "message": (
-                    f"kept {len(frame)} unique in-range molecules (requested {spec.n})"
-                ),
+                "message": summary,
                 "manifest": manifest,
                 "hits": hits_to_records(frame, spec),
             }

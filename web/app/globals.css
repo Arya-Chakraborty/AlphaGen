@@ -1,15 +1,17 @@
 :root {
-  --bg: #12140f;
-  --bg-2: #1b1f16;
-  --panel: #22271c;
-  --line: #3a4230;
-  --text: #e8edd9;
-  --muted: #9aa384;
-  --accent: #c4e265;
-  --accent-2: #7ec8a3;
-  --warn: #e0b45a;
-  --bad: #e07a5f;
-  --ok: #8fce6a;
+  --bg: #1a1a1a;
+  --bg-2: #2a2a2a;
+  --panel: #212121;
+  --line: #3a3a3a;
+  --text: #ececec;
+  --muted: #9a9a9a;
+  --accent: #ececec;
+  --accent-2: #c5c5c5;
+  --warn: #8f8f8f;
+  --bad: #e06c6c;
+  --ok: #ffffff;
+  --scroll-thumb: #4a4a4a;
+  --scroll-thumb-hover: #5f5f5f;
 }
 
 * {
@@ -26,7 +28,7 @@ body {
 }
 
 body {
-  background-image: radial-gradient(ellipse at top left, #2a3320 0%, transparent 55%);
+  background-image: none;
 }
 
 button,
@@ -37,6 +39,38 @@ select {
 
 button {
   cursor: pointer;
+}
+
+/* scrollbar-* is the standard property and inherits from html; the ::-webkit- rules
+   give Chrome/Safari the slim floating thumb (transparent border + content-box clip). */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 code,
@@ -129,8 +163,7 @@ input {
   padding: 0.25rem 0.7rem;
 }
 
-.chip:hover,
-.go:hover {
+.chip:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -140,9 +173,14 @@ input {
   width: 100%;
   padding: 0.7rem;
   background: var(--accent);
-  color: #1a1e12;
+  color: #0d0d0d;
   font-weight: 600;
   border: 0;
+}
+
+/* Keep the dark label: inheriting the chip hover colour hid it against the fill. */
+.go:hover:not(:disabled) {
+  background: #ffffff;
 }
 
 .go:disabled {
@@ -197,12 +235,12 @@ input {
 .log {
   height: 220px;
   overflow: auto;
-  background: #10140c;
+  background: #0d0d0d;
   border-radius: 10px;
   padding: 0.75rem;
   font-size: 0.78rem;
   line-height: 1.45;
-  color: #d7e7a8;
+  color: #d9d9d9;
   white-space: pre-wrap;
 }
 
@@ -227,7 +265,7 @@ input {
   width: 100%;
   height: 140px;
   object-fit: contain;
-  background: #f4f1e4;
+  background: #ffffff;
   border-radius: 8px;
 }
 
@@ -273,5 +311,121 @@ input {
   .pair,
   .ranges .pair {
     grid-template-columns: 1fr;
+  }
+}
+
+.thinking-open {
+  margin-top: 0.7rem;
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--accent-2);
+}
+
+.thinking-open:hover:not(:disabled) {
+  border-color: var(--accent-2);
+}
+
+.thinking-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.thinking {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+
+.thinking-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.thinking-bar h2 {
+  margin: 0;
+}
+
+.thinking-close {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 0.35rem 0.9rem;
+}
+
+.thinking-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.thinking-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+}
+
+.thinking-log {
+  overflow: auto;
+  padding: 1.1rem 1.25rem 2.5rem;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.thinking-line {
+  display: flex;
+  gap: 0.9rem;
+  margin: 0 0 0.3rem;
+  color: #d9d9d9;
+}
+
+.thinking-line time {
+  color: var(--muted);
+  flex: 0 0 6.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking-line.pending {
+  color: var(--accent);
+}
+
+.thinking-rail {
+  border-left: 1px solid var(--line);
+  overflow: auto;
+  padding: 1.1rem 0.9rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.thinking-rail h3 {
+  margin: 0 0 0.3rem;
+}
+
+.thinking-rail .mol img {
+  height: 100px;
+}
+
+@media (max-width: 760px) {
+  .thinking-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .thinking-rail {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    max-height: 38vh;
   }
 }

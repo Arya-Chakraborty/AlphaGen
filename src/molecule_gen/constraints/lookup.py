@@ -33,7 +33,7 @@ def describe_for_scoring(
     try:
         if inchikey and store is not None:
             hit = store.get(inchikey)
-            if hit is not None:
+            if hit is not None and all(name in hit for name in names):
                 return {name: _as_float(hit.get(name)) for name in names}, "cache"
 
         if allow_papyrus and connectivity:
@@ -46,9 +46,12 @@ def describe_for_scoring(
                 return {name: _as_float(row.get(name)) for name in names}, "papyrus"
 
         if smiles:
-            computed = mordred_from_smiles_batch([smiles])[0]
+            known = hit if inchikey and store is not None and hit else {}
+            missing = [name for name in names if name not in known]
+            computed = mordred_from_smiles_batch([smiles], names=missing)[0]
             if computed is None:
                 raise LookupError(f"Local Mordred failed on SMILES: {smiles}")
+            computed = {**known, **computed}
             if inchikey and store is not None:
                 store.put(inchikey, smiles, computed)
             return {name: _as_float(computed.get(name)) for name in names}, "local"

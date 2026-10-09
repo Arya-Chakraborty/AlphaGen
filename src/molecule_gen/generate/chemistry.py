@@ -55,8 +55,9 @@ def is_reasonable_molecule(smiles: str | None) -> bool:
     """Conservative organic filter. Used on mutants (and GPT seeds), not as a corpus check."""
     if not smiles:
         return False
-    from rdkit import Chem
-    from rdkit import RDLogger
+    from rdkit import Chem, RDLogger
+
+    from molecule_gen.generate.plausibility import unstable_motifs_in_mol
 
     RDLogger.DisableLog("rdApp.*")
     mol = Chem.MolFromSmiles(str(smiles).strip())
@@ -65,6 +66,8 @@ def is_reasonable_molecule(smiles: str | None) -> bool:
     try:
         Chem.SanitizeMol(mol)
     except Exception:
+        return False
+    if unstable_motifs_in_mol(mol):
         return False
     n_heavy = mol.GetNumHeavyAtoms()
     if n_heavy < MIN_HEAVY_ATOMS or n_heavy > MAX_HEAVY_ATOMS:

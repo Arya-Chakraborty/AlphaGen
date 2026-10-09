@@ -92,6 +92,22 @@ python -m molecule_gen generate --spec examples/tight.json
 
 Weights go to `checkpoints/selfies_gpt.pt`.
 
+## Plausibility
+
+Two signals, deliberately split.
+
+**Hard rules** reject chemistry that is simply wrong (peroxides, `N-O-N`, hypervalent sulfur, acyclic enols, geminal diols, `N-N-N`, phosphines). These run inside `is_reasonable_molecule`, so every mutant and seed is gated. Each rule was measured against Papyrus and matches under 0.16% of real molecules; hydroxylamine (1.26%) and acyclic `N-N` (0.94%) were tried and dropped as too common in real drugs to gate on.
+
+**Corpus novelty** is reported, not gated: the fraction of a molecule's Morgan (r=2) atom environments never seen in Papyrus. Build the reference set once:
+
+```bash
+python -m molecule_gen build-env-set --n 200000
+```
+
+Output: `data/processed/papyrus_env.parquet` (~86k environments). Every hit then carries `unseen_frac` in the parquet and the API.
+
+Calibration, measured on held-out Papyrus: median 0.019, p90 0.097, p99 0.231. Real drugs score 0.000–0.033. Anything above ~0.15 is worth a look; the GA can reach 0.4+ while still satisfying every descriptor range. `--n` and `--min-count` are the knobs.
+
 ## Phase 6 — web UI
 
 Backend (FastAPI) and frontend (Next.js) run as two processes.

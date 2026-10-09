@@ -34,8 +34,14 @@ type Hit = Candidate & {
   passed?: Record<string, boolean>;
 };
 
+type LogLine = {
+  ts: number;
+  message: string;
+};
+
 type EventMsg = {
   type: string;
+  ts?: number;
   message?: string;
   generation?: number;
   n_hits?: number;
@@ -52,6 +58,15 @@ function fmt(value: number | null | undefined, digits = 3): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   if (Math.abs(value) >= 100) return value.toFixed(1);
   return value.toFixed(digits);
+}
+
+function clockTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  const pad = (value: number, width = 2) => String(value).padStart(width, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(
+    d.getMilliseconds(),
+    3,
+  )}`;
 }
 
 function apiError(body: unknown, fallback: string): string {
@@ -81,13 +96,15 @@ export default function HomePage() {
   const [selected, setSelected] = useState<Selected[]>([]);
   const [n, setN] = useState(5);
   const [generations, setGenerations] = useState(20);
-  const [population, setPopulation] = useState(64);
+  const [population, setPopulation] = useState(32);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [log, setLog] = useState<string[]>([]);
+  const [log, setLog] = useState<LogLine[]>([]);
+  const [thinking, setThinking] = useState(false);
   const [generation, setGeneration] = useState<EventMsg | null>(null);
   const [hits, setHits] = useState<Hit[]>([]);
   const logRef = useRef<HTMLPreElement | null>(null);
+  const thinkingRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetch(`${API}/descriptors`)
@@ -106,7 +123,19 @@ export default function HomePage() {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  }, [log]);
+    if (thinkingRef.current) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [log, thinking]);
+
+  useEffect(() => {
+    if (!thinking) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setThinking(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [thinking]);
 
   const suggestions = useMemo(() => {
     const taken = new Set(selected.map((row) => row.name));
@@ -199,7 +228,11 @@ export default function HomePage() {
       source.onmessage = (msg) => {
         const event = JSON.parse(msg.data) as EventMsg;
         if (event.message) {
-          setLog((lines) => [...lines, event.message as string]);
+          const line: LogLine = {
+            ts: event.ts ?? Date.now() / 1000,
+            message: event.message,
+          };
+          setLog((lines) => [...lines, line]);
         }
         if (event.type === "generation" || event.type === "ga_start") {
           setGeneration(event);
@@ -347,8 +380,18 @@ export default function HomePage() {
         <section className="panel">
           <h2>Genetic algorithm</h2>
           <pre className="log" ref={logRef}>
-            {log.length ? log.join("\n") : "Backend progress will stream here."}
+            {log.length
+              ? log.map((line) => line.message).join("\n")
+              : "Backend progress will stream here."}
           </pre>
+          <button
+            type="button"
+            className="thinking-open"
+            onClick={() => setThinking(true)}
+            disabled={log.length === 0}
+          >
+            open thinking
+          </button>
           {generation?.population?.length ? (
             <div>
               <h3>
@@ -401,6 +444,62 @@ export default function HomePage() {
           </div>
         )}
       </section>
+
+      {thinking ? (
+        <div className="thinking" role="dialog" aria-modal="true" aria-label="Thinking">
+          <header className="thinking-bar">
+            <div>
+              <p className="kicker">thinking</p>
+              <h2>
+                {running ? "Generating…" : "Run finished"}
+                {generation?.generation !== undefined
+                  ? ` · generation ${generation.generation}`
+                  : ""}
+                {` · ${log.length} events`}
+              </h2>
+            </div>
+            <button
+              type="button"
+              className="thinking-close"
+              onClick={() => setThinking(false)}
+              aria-label="Close thinking view"
+            >
+              close
+            </button>
+          </header>
+
+          <div className="thinking-body">
+            <div className="thinking-log" ref={thinkingRef}>
+              {log.map((line, idx) => (
+                <p key={`${line.ts}-${idx}`} className="thinking-line">
+                  <time>{clockTime(line.ts)}</time>
+                  <span>{line.message}</span>
+                </p>
+              ))}
+              {running ? <p className="thinking-line pending">…</p> : null}
+            </div>
+
+            <aside className="thinking-rail">
+              <h3>Discovered · {hits.length}</h3>
+              {hits.length === 0 ? (
+                <p className="muted">Nothing in range yet.</p>
+              ) : (
+                hits.map((hit) => (
+                  <article key={hit.inchikey || hit.canonical_smiles} className="mol hit">
+                    {hit.canonical_smiles ? (
+                      <img src={depictUrl(hit.canonical_smiles)} alt={hit.canonical_smiles} />
+                    ) : null}
+                    <p className="smiles">{hit.canonical_smiles}</p>
+                    <p className="muted">
+                      gen {hit.generation ?? 0} · penalty {fmt(hit.penalty, 4)}
+                    </p>
+                  </article>
+                ))
+              )}
+            </aside>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

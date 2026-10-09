@@ -24,6 +24,13 @@ from molecule_gen.generate.corpus import (
     selfies_manifest_path,
     selfies_parquet_path,
 )
+from molecule_gen.generate.plausibility import (
+    DEFAULT_ENV_SAMPLE,
+    DEFAULT_MIN_COUNT,
+    build_env_set,
+    env_manifest_path,
+    env_set_path,
+)
 from molecule_gen.generate.run import (
     DEFAULT_GENERATIONS,
     DEFAULT_POPULATION,
@@ -287,6 +294,25 @@ def main(argv: list[str] | None = None) -> None:
         help="Output parquet (default data/processed/transformer_samples.parquet).",
     )
 
+    env_set = sub.add_parser(
+        "build-env-set",
+        help="Collect the Morgan atom environments seen in Papyrus (plausibility reference).",
+    )
+    env_set.add_argument(
+        "--n",
+        type=int,
+        default=DEFAULT_ENV_SAMPLE,
+        help=f"Molecules to scan (default {DEFAULT_ENV_SAMPLE}).",
+    )
+    env_set.add_argument(
+        "--min-count",
+        type=int,
+        default=DEFAULT_MIN_COUNT,
+        help=f"Times an environment must appear to count as seen (default {DEFAULT_MIN_COUNT}).",
+    )
+    env_set.add_argument("--seed", type=int, default=0, help="Sampling seed.")
+    env_set.add_argument("--force", action="store_true", help="Rebuild even if present.")
+
     serve = sub.add_parser(
         "serve",
         help="Run the FastAPI backend for the web UI.",
@@ -420,6 +446,16 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
         print(f"manifest: {sample_manifest_path()}", file=sys.stderr)
+    elif args.command == "build-env-set":
+        manifest = build_env_set(
+            n=args.n,
+            min_count=args.min_count,
+            seed=args.seed,
+            force=args.force,
+        )
+        print(json.dumps(manifest, indent=2))
+        print(f"environments: {env_set_path()}", file=sys.stderr)
+        print(f"manifest: {env_manifest_path()}", file=sys.stderr)
     elif args.command == "serve":
         try:
             import uvicorn

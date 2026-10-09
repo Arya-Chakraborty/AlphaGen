@@ -28,6 +28,15 @@ ImmigrantFn = Callable[[int, dict[str, Any] | None, set[str]], list[dict[str, An
 CLOSE_PENALTY = 0.01
 CLOSE_STREAK = 3
 STAGNATION_STREAK = 8
+# Seeding stays cheap at the starting size; only a stuck search pays for a bigger
+# population. Feasible specs converge before this ever fires. Measured on an
+# infeasible 8-descriptor box: x4 every 8 stagnant gens = 11.7s 4/4, x2 = 19.0s 3/4,
+# x4 every 4 = 77.5s 3/4. Growing too eagerly costs more than it buys.
+# Fixed population by default: per-generation cost stays low. Set >1 to let a stuck
+# search grow (x4 every 8 stagnant gens measured 11.7s 4/4 on an infeasible
+# 8-descriptor box vs 17.0s 1/4 fixed; x2 19.0s 3/4; x4 every 4 gens 77.5s 3/4).
+POPULATION_GROWTH = 1
+MAX_POPULATION = 256
 STAGNATION_EPS = 1e-6
 LOCAL_EDIT_P = 1.0
 
@@ -45,6 +54,22 @@ def candidate_preview(candidate: dict[str, Any] | None) -> dict[str, Any] | None
         "origin": candidate.get("origin"),
         "values": candidate.get("values") or {},
     }
+
+
+def miss_summary(candidate: dict[str, Any] | None, spec: ConstraintSpec) -> str:
+    """e.g. '7/8 in range; TopoPSA 100.25 > 100'."""
+    values = (candidate or {}).get("values") or {}
+    misses: list[str] = []
+    for item in spec.ranges:
+        value = values.get(item.name)
+        if value is None:
+            misses.append(f"{item.name} missing")
+        elif value < item.minimum:
+            misses.append(f"{item.name} {value:g} < {item.minimum:g}")
+        elif value > item.maximum:
+            misses.append(f"{item.name} {value:g} > {item.maximum:g}")
+    text = f"{len(spec.ranges) - len(misses)}/{len(spec.ranges)} in range"
+    return "; ".join([text, *misses]) if misses else text
 
 
 def _emit(on_progress: ProgressFn | None, event: dict[str, Any]) -> None:
@@ -181,18 +206,36 @@ def evolve(
         if len(hits) >= spec.n or generations <= 0:
             return list(hits.values())[: spec.n]
 
-        n_elite = max(2, int(population_size * elite_frac))
+        current_size = population_size
         prev_best: float | None = None
         stagnant_streak = 0
         close_streak = 0
         for gen in range(1, generations + 1):
             if len(hits) >= spec.n:
                 break
+            if (
+                POPULATION_GROWTH > 1
+                and stagnant_streak >= STAGNATION_STREAK
+                and current_size < MAX_POPULATION
+            ):
+                current_size = min(MAX_POPULATION, current_size * POPULATION_GROWTH)
+                _emit(
+                    on_progress,
+                    {
+                        "type": "population",
+                        "message": (
+                            f"generation {gen}: population -> {current_size} (stagnation)"
+                        ),
+                        "generation": gen,
+                        "population_size": current_size,
+                    },
+                )
+            n_elite = max(2, int(current_size * elite_frac))
             population.sort(key=_fitness)
             elites = diverse_elites(population, min(n_elite, len(population)))
             if len(elites) < 2 and population:
                 elites = population[: min(n_elite, len(population))]
-            needed = max(0, population_size - len(elites))
+            needed = max(0, current_size - len(elites))
             children: list[dict[str, Any]] = []
             use_local = close_streak >= CLOSE_STREAK
             if (
@@ -252,6 +295,9 @@ def evolve(
                             str(parent.get("canonical_smiles") or ""), rng
                         )
                         origin = "local_edit"
+                        parsed = canonicalize_smiles(child_smiles) if child_smiles else None
+                        if parsed is not None and parsed[1] in seen:
+                            child_smiles = None  # exhausted neighbourhood: use SELFIES instead
                     if child_smiles is None:
                         origin = "mutant"
                         if rng.random() < crossover_p and len(elites) >= 2:
@@ -294,7 +340,7 @@ def evolve(
             else:
                 stagnant_streak = 0
             prev_best = best_pen_value
-            best_pen = f"{best_pen_value:.4f}" if best_pen_value is not None else "?"
+            best_pen = f"{best_pen_value:.3g}" if best_pen_value is not None else "?"
             mode = "local" if use_local else "selfies"
             _emit(
                 on_progress,
@@ -302,7 +348,7 @@ def evolve(
                     "type": "generation",
                     "message": (
                         f"generation {gen}: pop={len(population)} hits={len(hits)} "
-                        f"best_penalty={best_pen} mode={mode}"
+                        f"best_penalty={best_pen} ({miss_summary(best, spec)}) mode={mode}"
                     ),
                     "generation": gen,
                     "n_population": len(population),

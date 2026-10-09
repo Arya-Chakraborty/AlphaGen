@@ -144,3 +144,48 @@ def test_mordred_ethanol_cache(tmp_path: Path):
     assert stats2["n_cached"] == 1
     assert stats2["n_computed"] == 0
     assert first["nAtom"].iloc[0] == second["nAtom"].iloc[0]
+
+
+@pytest.mark.integration
+def test_mordred_subset_computes_only_requested():
+    pytest.importorskip("mordred")
+    from molecule_gen.descriptors.mordred import mordred_from_smiles_batch
+
+    names = ["nAtom", "SLogP"]
+    subset = mordred_from_smiles_batch(["CCO", "not-a-smiles"], names=names)
+    full = mordred_from_smiles_batch(["CCO"])
+    assert subset[1] is None
+    assert set(subset[0]) == set(names)
+    assert subset[0] == {name: full[0][name] for name in names}
+
+
+def test_describe_for_scoring_computes_only_missing_names(tmp_path: Path, monkeypatch):
+    from molecule_gen.constraints import lookup
+
+    calls: list[tuple[list[str], list[str] | None]] = []
+
+    def fake_batch(smiles_list, names=None):
+        calls.append((list(smiles_list), names))
+        return [{name: 1.0 for name in names} for _ in smiles_list]
+
+    monkeypatch.setattr(lookup, "mordred_from_smiles_batch", fake_batch)
+    cache = DescriptorCache(tmp_path / "cache.sqlite")
+    kwargs = dict(
+        smiles="CCO", inchikey="KEY", connectivity=None, cache=cache, allow_papyrus=False
+    )
+
+    values, source = lookup.describe_for_scoring(names=["nAtom"], **kwargs)
+    assert (values, source) == ({"nAtom": 1.0}, "local")
+    assert calls == [(["CCO"], ["nAtom"])]
+
+    # same names again: pure cache hit
+    _, source = lookup.describe_for_scoring(names=["nAtom"], **kwargs)
+    assert source == "cache"
+    assert len(calls) == 1
+
+    # new name: cached partial payload must not yield None; only the gap is computed
+    values, source = lookup.describe_for_scoring(names=["nAtom", "SLogP"], **kwargs)
+    assert values == {"nAtom": 1.0, "SLogP": 1.0}
+    assert calls[-1] == (["CCO"], ["SLogP"])
+    assert set(cache.get("KEY")) == {"nAtom", "SLogP"}
+    cache.close()

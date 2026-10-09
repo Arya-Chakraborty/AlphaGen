@@ -9,7 +9,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      {/* Extensions inject attributes (e.g. style="cursor: auto") onto body before
+          React hydrates. Shallow, so real mismatches inside the app still warn. */}
+      <body suppressHydrationWarning>{children}</body>
     </html>
   );
 }

@@ -7,7 +7,7 @@ from molecule_gen.constraints.spec import parse_spec
 from molecule_gen.data.clean import canonicalize_smiles, connectivity_from_inchikey
 from molecule_gen.generate.run import generate_molecules
 from molecule_gen.generate.selfies_util import smiles_to_selfies, split_selfies
-from molecule_gen.generate.transformer import SelfiesTokenizer
+from molecule_gen.generate.transformer import SelfiesTokenizer, default_checkpoint_path
 
 
 def _fake_eval(smiles: str):
@@ -110,3 +110,26 @@ def test_tiny_gpt_loss_drops(tmp_path: Path):
         8, checkpoint=ckpt, seed=1, device_name="cpu", max_draws=64
     )
     assert isinstance(sampled, list)
+
+
+def test_cached_checkpoint_loads_once(tmp_path, monkeypatch):
+    from molecule_gen.generate import sample as sample_mod
+
+    pytest.importorskip("torch")
+    ckpt = default_checkpoint_path()
+    if not ckpt.exists():
+        pytest.skip("no trained checkpoint")
+
+    calls: list[object] = []
+    real = sample_mod.load_checkpoint
+
+    def counting(path=None, **kwargs):
+        calls.append(path)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(sample_mod, "load_checkpoint", counting)
+    sample_mod.cached_checkpoint.cache_clear()
+    first = sample_mod.cached_checkpoint(ckpt)
+    second = sample_mod.cached_checkpoint(ckpt)
+    assert first is second
+    assert len(calls) == 1

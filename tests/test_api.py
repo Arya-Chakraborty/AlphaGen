@@ -48,3 +48,13 @@ def test_parse_spec_does_not_clamp_to_corpus():
     spec = parse_spec({"n": 2, "descriptors": {"MW": {"min": -50, "max": 9000}}})
     assert spec.ranges[0].minimum == -50
     assert spec.ranges[0].maximum == 9000
+
+
+def test_events_carry_timestamps():
+    from molecule_gen.api.app import GenerateJob
+
+    job = GenerateJob("abc", {})
+    job.emit({"type": "generation", "message": "gen 1"})
+    event = job.snapshot_history()[0]
+    assert isinstance(event["ts"], float)
+    assert event["ts"] > 0

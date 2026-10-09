@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from molecule_gen.generate.transformer import (
 )
 from molecule_gen.paths import PROCESSED_DIR, PROJECT_ROOT, ensure_processed_dir
 
+EOS_CHECK_EVERY = 8
 SAMPLE_PARQUET = "transformer_samples.parquet"
 SAMPLE_MANIFEST = "transformer_samples_manifest.json"
 
@@ -34,6 +36,24 @@ def _relpath(path: Path) -> str:
         return str(path)
 
 
+@lru_cache(maxsize=2)
+def _cached_checkpoint(path: Path, mtime: float):
+    return load_checkpoint(path, map_location="cpu")
+
+
+def cached_checkpoint(path: Path | None = None):
+    """load_checkpoint, reused across calls. Reloads if the file changes on disk."""
+    dest = path or default_checkpoint_path()
+    try:
+        mtime = dest.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return _cached_checkpoint(dest, mtime)
+
+
+cached_checkpoint.cache_clear = _cached_checkpoint.cache_clear
+
+
 def generate_selfies_batch(
     model,
     tokenizer,
@@ -49,7 +69,7 @@ def generate_selfies_batch(
     block = model.config.block_size
     idx = torch.full((n, 1), tokenizer.bos_id, dtype=torch.long, device=device)
     with torch.no_grad():
-        for _ in range(block - 1):
+        for step in range(block - 1):
             logits, _loss = model(idx[:, -block:])
             logits = logits[:, -1, :] / max(temperature, 1e-6)
             logits[:, tokenizer.pad_id] = -float("inf")
@@ -60,7 +80,9 @@ def generate_selfies_batch(
             probs = F.softmax(logits, dim=-1)
             nxt = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, nxt], dim=1)
-            if bool((idx[:, 1:] == tokenizer.eos_id).any(dim=1).all().item()):
+            if step % EOS_CHECK_EVERY == 0 and bool(
+                (idx[:, 1:] == tokenizer.eos_id).any(dim=1).all().item()
+            ):
                 break
     return [tokenizer.decode(row.tolist()) for row in idx.cpu()]
 
@@ -93,7 +115,7 @@ def sample_valid_smiles(
     torch = require_torch()
     torch.manual_seed(seed)
     device = pick_device(device_name)
-    model, tokenizer, _extra = load_checkpoint(checkpoint, map_location="cpu")
+    model, tokenizer, _extra = cached_checkpoint(checkpoint)
     model.to(device)
     budget = max_draws if max_draws is not None else max(n * 20, n)
     unique: list[str] = []
